@@ -1,13 +1,6 @@
 // Copyright (c) 2024 Epic Games Tools
 // Licensed under the MIT license (https://opensource.org/license/mit/)
 
-// TODO(allen): run controls: ignore_previous_exception
-
-////////////////////////////////
-//~ allen: Elf Parsing Code
-
-#include "syms/syms_elf_inc.c"
-
 ////////////////////////////////
 //~ rjf: Globals
 
@@ -115,6 +108,29 @@ demon_lnx_open_memory_fd_for_pid(pid_t pid){
   return(result);
 }
 
+internal Elf64_Ehdr
+demon_lnx_elf_ehdr64_from_ehdr32(Elf32_Ehdr *ehdr32)
+{
+  Elf64_Ehdr ehdr {0};
+
+  MemoryCopyArray(ehdr.e_ident, ehdr32->e_ident);
+  ehdr.e_type = ehdr32->e_type;
+  ehdr.e_machine = ehdr32->e_machine;
+  ehdr.e_version = ehdr32->e_version;
+  ehdr.e_entry = ehdr32->e_entry;
+  ehdr.e_phoff = ehdr32->e_phoff;
+  ehdr.e_shoff = ehdr32->e_shoff;
+  ehdr.e_flags = ehdr32->e_flags;
+  ehdr.e_ehsize = ehdr32->e_ehsize;
+  ehdr.e_phentsize = ehdr32->e_phentsize;
+  ehdr.e_phnum = ehdr32->e_phnum;
+  ehdr.e_shentsize = ehdr32->e_shentsize;
+  ehdr.e_shnum = ehdr32->e_shnum;
+  ehdr.e_shstrndx = ehdr32->e_shstrndx;
+
+  return(ehdr);
+}
+
 internal Architecture
 demon_lnx_arch_from_pid(pid_t pid){
   Temp scratch = scratch_begin(0, 0);
@@ -131,30 +147,30 @@ demon_lnx_arch_from_pid(pid_t pid){
   
   // elf identification
   B32 is_elf = false;
-  U8 e_ident[SYMS_ElfIdentifier_NIDENT] = {0};
+  U8 e_ident[EI_NIDENT] = {0};
   if (exe_fd >= 0){
     if (pread(exe_fd, e_ident, sizeof(e_ident), 0) == sizeof(e_ident)){
-      is_elf = (e_ident[SYMS_ElfIdentifier_MAG0] == 0x7f && 
-                e_ident[SYMS_ElfIdentifier_MAG1] == 'E'  &&
-                e_ident[SYMS_ElfIdentifier_MAG2] == 'L'  && 
-                e_ident[SYMS_ElfIdentifier_MAG3] == 'F');
+      is_elf = (e_ident[EI_MAG0] == 0x7f && 
+                e_ident[EI_MAG1] == 'E'  &&
+                e_ident[EI_MAG2] == 'L'  && 
+                e_ident[EI_MAG3] == 'F');
     }
   }
   
   // elf class
   U8 elf_class = 0;
   if (is_elf){
-    elf_class = e_ident[SYMS_ElfIdentifier_CLASS];
+    elf_class = e_ident[EI_CLASS];
   }
   
   // exe header data
-  SYMS_ElfEhdr64 ehdr = {0};
+  Elf64_Ehdr ehdr = {0};
   switch (elf_class){
     case 1:
     {
-      SYMS_ElfEhdr32 ehdr32 = {0};
+      Elf32_Ehdr ehdr32 = {0};
       if (pread(exe_fd, &ehdr32, sizeof(ehdr32), 0) == sizeof(ehdr32)){
-        ehdr = syms_elf_ehdr64_from_ehdr32(ehdr32);
+        ehdr = demon_lnx_elf_ehdr64_from_ehdr32(ehdr32);
       }
     }break;
     
@@ -166,22 +182,22 @@ demon_lnx_arch_from_pid(pid_t pid){
   
   // determine machine type
   switch (ehdr.e_machine){
-    case SYMS_ElfMachineKind_386:
+    case EM_386:
     {
       result = Architecture_x86;
     }break;
     
-    case SYMS_ElfMachineKind_ARM:
+    case EM_ARM:
     {
       result = Architecture_arm32;
     }break;
     
-    case SYMS_ElfMachineKind_X86_64:
+    case EM_X86_64:
     {
       result = Architecture_x64;
     }break;
     
-    case SYMS_ElfMachineKind_AARCH64:
+    case EM_AARCH64:
     {
       result = Architecture_arm64;
     }break;
@@ -210,30 +226,30 @@ demon_lnx_aux_from_pid(pid_t pid, Architecture arch){
       U64 type = 0;
       U64 val = 0;
       if (addr_32bit){
-        SYMS_ElfAuxv32 aux;
+        Elf32_auxv_t aux;
         if (read(aux_fd, &aux, sizeof(aux)) != sizeof(aux)){
           goto brkloop;
         }
         type = aux.a_type;
-        val = aux.a_val;
+        val = aux.a_un.a_val;
       }
       else{
-        SYMS_ElfAuxv64 aux;
+        Elf64_auxv_t  aux;
         if (read(aux_fd, &aux, sizeof(aux)) != sizeof(aux)){
           goto brkloop;
         }
         type = aux.a_type;
-        val = aux.a_val;
+        val = aux.a_un.a_val;
       }
       
       // place value in result
       switch (type){
         default:break;
-        case SYMS_ElfAuxType_NULL:         goto brkloop; break;
-        case SYMS_ElfAuxType_PHNUM:        result.phnum  = val; break;
-        case SYMS_ElfAuxType_PHENT:        result.phent  = val; break;
-        case SYMS_ElfAuxType_PHDR:         result.phdr   = val; break;
-        case SYMS_ElfAuxType_EXECFN:       result.execfn = val; break;
+        case AT_NULL:         goto brkloop; break;
+        case AT_PHNUM:        result.phnum  = val; break;
+        case AT_PHENT:        result.phent  = val; break;
+        case AT_PHDR:         result.phdr   = val; break;
+        case AT_EXECFN:       result.execfn = val; break;
       }
     }
     brkloop:;
@@ -251,7 +267,7 @@ demon_lnx_phdr_info_from_memory(int memory_fd, B32 is_32bit, U64 phvaddr, U64 ph
   result.range.min = max_U64;
   
   // how much phdr will we read?
-  U64 phdr_size_expected = (is_32bit?sizeof(SYMS_ElfPhdr32):sizeof(SYMS_ElfPhdr64));
+  U64 phdr_size_expected = (is_32bit?sizeof(Elf32_Phdr):sizeof(Elf64_Phdr));
   U64 phdr_stride = (phentsize?phentsize:phdr_size_expected);
   U64 phdr_read_size = ClampTop(phdr_stride, phdr_size_expected);
   
@@ -260,19 +276,19 @@ demon_lnx_phdr_info_from_memory(int memory_fd, B32 is_32bit, U64 phvaddr, U64 ph
   for (U64 i = 0; i < phcount; i += 1, va += phdr_stride){
     
     // get type and range
-    SYMS_ElfPKind p_type = 0;
+    U32 p_type = 0;
     U64 p_vaddr = 0;
     U64 p_memsz = 0;
     
     if (is_32bit){
-      SYMS_ElfPhdr32 phdr32 = {0};
+      Elf32_Phdr phdr32 = {0};
       demon_lnx_read_memory(memory_fd, &phdr32, va, phdr_read_size);
       p_type = phdr32.p_type;
       p_vaddr = phdr32.p_vaddr;
       p_memsz = phdr32.p_memsz;
     }
     else{
-      SYMS_ElfPhdr64 phdr64 = {0};
+      Elf64_Phdr phdr64 = {0};
       demon_lnx_read_memory(memory_fd, &phdr64, va, phdr_read_size);
       p_type = phdr64.p_type;
       p_vaddr = phdr64.p_vaddr;
@@ -281,11 +297,11 @@ demon_lnx_phdr_info_from_memory(int memory_fd, B32 is_32bit, U64 phvaddr, U64 ph
     
     // save useful info
     switch (p_type){
-      case SYMS_ElfPKind_Dynamic:
+      case PT_DYNAMIC:
       {
         result.dynamic = p_vaddr;
       }break;
-      case SYMS_ElfPKind_Load:
+      case PT_LOAD:
       {
         U64 min = p_vaddr;
         U64 max = p_vaddr + p_memsz;
@@ -311,17 +327,20 @@ demon_lnx_module_list_from_process(Arena *arena, DEMON_Entity *process){
   DEMON_LNX_PhdrInfo phdr_info = demon_lnx_phdr_info_from_memory(memory_fd, is_32bit,
                                                                  aux.phdr, aux.phent, aux.phnum);
   
+  // NOTE(rd): I know a lot of this is confusing if you're not familiar with ELF, but I found this
+  //           gist very helpful: https://gist.github.com/DhavalKapil/2243db1b732b211d0c16fd5d9140ab0b
+  
   // linkmap first from memory space & dyn address
   U64 first_linkmap_va = 0;
   if (phdr_info.dynamic != 0){
     U64 off = phdr_info.dynamic;
     for (;;){
-      SYMS_ElfDyn64 dyn = {0};
+      Elf64_Dyn dyn = {0};
       if (is_32bit){
-        SYMS_ElfDyn32 dyn32 = {0};
+        Elf32_Dyn dyn32 = {0};
         demon_lnx_read_memory(memory_fd, &dyn32, off, sizeof(dyn32));
-        dyn.tag = dyn32.tag;
-        dyn.val = dyn32.val;
+        dyn.d_tag = dyn32.d_tag;
+        dyn.d_un.d_val = dyn32.d_un.d_val;
         off += sizeof(dyn32);
       }
       else{
@@ -329,20 +348,20 @@ demon_lnx_module_list_from_process(Arena *arena, DEMON_Entity *process){
         off += sizeof(dyn);
       }
       
-      if (dyn.tag == SYMS_ElfDynTag_NULL){
+      if (dyn.d_tag == DT_NULL){
         break;
       }
       
-      if (dyn.tag == SYMS_ElfDynTag_PLTGOT){
+      if (dyn.d_tag == DT_PLTGOT){
         // True for x86 and x64
-        //  vas[0] virtual address of .dynamic
-        //  vas[2] callback for resolving function address of relocation and if successful jumps to it.
+        //  got[0] virtual address of .dynamic
+        //  got[2] callback for resolving function address of relocation and if successful jumps to it.
         // 
         // Code that sets up PLTGOT is in glibc/sysdeps/x86_64/dl_machine.h -> elf_machine_runtime_setup
-        U64 vas_off = dyn.val;
-        U64 vas[3] = {0};
-        demon_lnx_read_memory(memory_fd, vas, vas_off, sizeof(vas));
-        first_linkmap_va = vas[1];
+        U64 got_off = dyn.d_un.d_val;
+        U64 reserved_got_entries[3] = {0};
+        demon_lnx_read_memory(memory_fd, reserved_got_entries, got_off, sizeof(reserved_got_entries));
+        first_linkmap_va = reserved_got_entries[1];
         break;
       }
     }
@@ -366,37 +385,36 @@ demon_lnx_module_list_from_process(Arena *arena, DEMON_Entity *process){
     U64 linkmap_va = first_linkmap_va;
     
     for (;;){
-      SYMS_ElfLinkMap64 linkmap = {0};
+      ElfLinkMap64 linkmap = {0};
       if (is_32bit){
         // TOOD(nick): endian awarness
-        SYMS_ElfLinkMap32 linkmap32 = {0};
+        ElfLinkMap32 linkmap32 = {0};
         demon_lnx_read_memory(memory_fd, &linkmap32, linkmap_va, sizeof(linkmap32));
-        linkmap.base = linkmap32.base;
-        linkmap.name = linkmap32.name;
-        linkmap.ld   = linkmap32.ld;
-        linkmap.next = linkmap32.next;
+        linkmap.l_addr = linkmap32.l_addr;
+        linkmap.l_name = linkmap32.l_name;
+        linkmap.l_next = linkmap32.l_next;
       }
       else{
         demon_lnx_read_memory(memory_fd, &linkmap, linkmap_va, sizeof(linkmap));
       }
       
-      if (linkmap.base != 0){
+      if (linkmap.l_addr != 0){
         // find phdrs for this module
-        SYMS_U64 phvaddr = 0;
-        SYMS_U64 phentsize = 0;
-        SYMS_U64 phcount = 0;
+        U64 phvaddr = 0;
+        U64 phentsize = 0;
+        U64 phcount = 0;
         
         if (is_32bit){
-          SYMS_ElfEhdr32 ehdr = {0};
-          demon_lnx_read_memory(memory_fd, &ehdr, linkmap.base, sizeof(ehdr));
-          phvaddr = ehdr.e_phoff + linkmap.base;
+          Elf32_Ehdr ehdr = {0};
+          demon_lnx_read_memory(memory_fd, &ehdr, linkmap.l_addr, sizeof(ehdr));
+          phvaddr = ehdr.e_phoff + linkmap.l_addr;
           phentsize = ehdr.e_phentsize;
           phcount = ehdr.e_phnum;
         }
         else{
-          SYMS_ElfEhdr64 ehdr = {0};
-          demon_lnx_read_memory(memory_fd, &ehdr, linkmap.base, sizeof(ehdr));
-          phvaddr = ehdr.e_phoff + linkmap.base;
+          Elf64_Ehdr ehdr = {0};
+          demon_lnx_read_memory(memory_fd, &ehdr, linkmap.l_addr, sizeof(ehdr));
+          phvaddr = ehdr.e_phoff + linkmap.l_addr;
           phentsize = ehdr.e_phentsize;
           phcount = ehdr.e_phnum;
         }
@@ -408,12 +426,12 @@ demon_lnx_module_list_from_process(Arena *arena, DEMON_Entity *process){
         // save module node
         DEMON_LNX_ModuleNode *node = push_array(arena, DEMON_LNX_ModuleNode, 1);
         SLLQueuePush(first, last, node);
-        node->vaddr = linkmap.base;
+        node->vaddr = linkmap.l_addr;
         node->size = module_phdr_info.range.max - module_phdr_info.range.min;
-        node->name = linkmap.name;
+        node->name = (U64)linkmap.l_name;
       }
       
-      linkmap_va = linkmap.next;
+      linkmap_va = linkmap.l_next;
       if (linkmap_va == 0){
         break;
       }
@@ -506,7 +524,7 @@ demon_lnx_read_memory_str(Arena *arena, int memory_fd, U64 address){
 }
 
 internal void
-demon_lnx_regs_x64_from_usr_regs_x64(SYMS_RegX64 *dst, DEMON_LNX_UserRegsX64 *src){
+demon_lnx_regs_x64_from_usr_regs_x64(REGS_RegBlockX64 *dst, DEMON_LNX_UserRegsX64 *src){
   dst->rax.u64 = src->rax;
   dst->rcx.u64 = src->rcx;
   dst->rdx.u64 = src->rdx;
@@ -536,7 +554,7 @@ demon_lnx_regs_x64_from_usr_regs_x64(SYMS_RegX64 *dst, DEMON_LNX_UserRegsX64 *sr
 }
 
 internal void
-demon_lnx_usr_regs_x64_from_regs_x64(DEMON_LNX_UserRegsX64 *dst, SYMS_RegX64 *src){
+demon_lnx_usr_regs_x64_from_regs_x64(DEMON_LNX_UserRegsX64 *dst, REGS_RegBlockX64 *src){
   dst->rax = src->rax.u64;
   dst->rcx = src->rcx.u64;
   dst->rdx = src->rdx.u64;
@@ -806,10 +824,12 @@ demon_os_run(Arena *arena, DEMON_OS_RunCtrls *controls){
   DEMON_EventList result = {0};
   
   if (demon_ent_root == 0){
-    demon_push_event(arena, &result, DEMON_EventKind_NotInitialized);
+    DEMON_Event *event = demon_push_event(arena, &result, DEMON_EventKind_Error);
+    event->error_kind = DEMON_ErrorKind_NotInitialized;
   }
   else if (demon_ent_root->first == 0 && !demon_lnx_new_process_pending){
-    demon_push_event(arena, &result, DEMON_EventKind_NotAttached);
+    DEMON_Event *event = demon_push_event(arena, &result, DEMON_EventKind_Error);
+    event->error_kind = DEMON_ErrorKind_NotInitialized;
   }
   else{
     Temp scratch = scratch_begin(&arena, 1);
@@ -817,10 +837,10 @@ demon_os_run(Arena *arena, DEMON_OS_RunCtrls *controls){
     // use queued events if there are any
     if (demon_lnx_queued_events.first != 0){
       // copy event queue
-      for (DEMON_Event *node = demon_lnx_queued_events.first;
+      for (DEMON_EventNode *node = demon_lnx_queued_events.first;
            node != 0;
            node = node->next){
-        DEMON_Event *copy = push_array_no_zero(arena, DEMON_Event, 1);
+        DEMON_EventNode *copy = push_array_no_zero(arena, DEMON_EventNode, 1);
         MemoryCopyStruct(copy, node);
         SLLQueuePush(result.first, result.last, copy);
       }
@@ -846,7 +866,7 @@ demon_os_run(Arena *arena, DEMON_OS_RunCtrls *controls){
           case Architecture_x86:
           {
             // TODO(allen): possibly buggy
-            SYMS_RegX86 regs = {0};
+            REGS_RegBlockX86 regs = {0};
             demon_os_read_regs_x86(single_step_thread, &regs);
             regs.eflags.u32 |= 0x100;
             demon_os_write_regs_x86(single_step_thread, &regs);
@@ -855,7 +875,7 @@ demon_os_run(Arena *arena, DEMON_OS_RunCtrls *controls){
           case Architecture_x64:
           {
             // TODO(allen): possibly buggy
-            SYMS_RegX64 regs = {0};
+            REGS_RegBlockX64 regs = {0};
             demon_os_read_regs_x64(single_step_thread, &regs);
             regs.rflags.u64 |= 0x100;
             demon_os_write_regs_x64(single_step_thread, &regs);
@@ -977,7 +997,7 @@ demon_os_run(Arena *arena, DEMON_OS_RunCtrls *controls){
         
         // read register info
         U64 instruction_pointer = 0;
-        union{ SYMS_RegX86 x86; SYMS_RegX64 x64; } regs = {0};
+        union{ REGS_RegBlockX86 x86; REGS_RegBlockX64 x64; } regs = {0};
         
         switch (thread->arch){
           case Architecture_x86:
@@ -1358,7 +1378,7 @@ demon_os_run(Arena *arena, DEMON_OS_RunCtrls *controls){
         switch (single_step_thread->arch){
           case Architecture_x86:
           {
-            SYMS_RegX86 regs = {0};
+            REGS_RegBlockX86 regs = {0};
             demon_os_read_regs_x86(single_step_thread, &regs);
             regs.eflags.u32 &= ~0x100;
             demon_os_write_regs_x86(single_step_thread, &regs);
@@ -1366,7 +1386,7 @@ demon_os_run(Arena *arena, DEMON_OS_RunCtrls *controls){
           
           case Architecture_x64:
           {
-            SYMS_RegX64 regs = {0};
+            REGS_RegBlockX64 regs = {0};
             demon_os_read_regs_x64(single_step_thread, &regs);
             regs.rflags.u64 &= ~0x100;
             demon_os_write_regs_x64(single_step_thread, &regs);
@@ -1873,21 +1893,21 @@ demon_os_write_memory(DEMON_Entity *process, U64 dst_address, void *src, U64 siz
 //- rjf: thread registers reading/writing
 
 internal B32
-demon_os_read_regs_x86(DEMON_Entity *thread, SYMS_RegX86 *dst){
+demon_os_read_regs_x86(DEMON_Entity *thread, REGS_RegBlockX86 *dst){
   B32 result = false;
   NotImplemented;
   return(result);
 }
 
 internal B32
-demon_os_write_regs_x86(DEMON_Entity *thread, SYMS_RegX86 *src){
+demon_os_write_regs_x86(DEMON_Entity *thread, REGS_RegBlockX86 *src){
   B32 result = false;
   NotImplemented;
   return(result);
 }
 
 internal B32
-demon_os_read_regs_x64(DEMON_Entity *thread, SYMS_RegX64 *dst){
+demon_os_read_regs_x64(DEMON_Entity *thread, REGS_RegBlockX64 *dst){
   pid_t tid = (pid_t)thread->id;
   
   // gpr
@@ -1904,6 +1924,9 @@ demon_os_read_regs_x64(DEMON_Entity *thread, SYMS_RegX64 *dst){
   // fpr
   B32 got_fpr = false;
   if (got_gpr){
+  // TODO(rd): Implement these once I find out what in the world
+  //           SYMS_XSave and SYMS_XSaveLegacy are supposed to be
+#if 0
     B32 got_xsave = false;
     {
       U8 xsave_buffer[KB(4)];
@@ -1940,13 +1963,14 @@ demon_os_read_regs_x64(DEMON_Entity *thread, SYMS_RegX64 *dst){
     if (got_xsave || got_fxsave){
       got_fpr = true;
     }
+#endif
   }
   
   // debug
   B32 got_debug = false;
   if (got_fpr){
     got_debug = true;
-    SYMS_Reg32 *dr_d = &dst->dr0;
+    REGS_Reg32 *dr_d = &dst->dr0;
     for (U32 i = 0; i < 8; i += 1, dr_d += 1){
       if (i != 4 && i != 5){
         U64 offset = OffsetOf(DEMON_LNX_UserX64, u_debugreg[i]);
@@ -1968,7 +1992,7 @@ demon_os_read_regs_x64(DEMON_Entity *thread, SYMS_RegX64 *dst){
 }
 
 internal B32
-demon_os_write_regs_x64(DEMON_Entity *thread, SYMS_RegX64 *src){
+demon_os_write_regs_x64(DEMON_Entity *thread, REGS_RegBlockX64 *src){
   pid_t tid = (pid_t)thread->id;
   
   // gpr
@@ -1985,6 +2009,9 @@ demon_os_write_regs_x64(DEMON_Entity *thread, SYMS_RegX64 *src){
   int xsave_result = 0;
   int fxsave_result = 0;
   
+  // TODO(rd): Implement once I find out what in the world SYMS_XSave
+  //           is supposed to be
+#if 0
   {
     U8 xsave_buffer[KB(4)] = {0};
     SYMS_XSave *xsave = (SYMS_XSave*)xsave_buffer;
@@ -2010,13 +2037,14 @@ demon_os_write_regs_x64(DEMON_Entity *thread, SYMS_RegX64 *src){
       fxsave_result = ptrace(PTRACE_SETREGSET, tid, (void*)NT_FPREGSET, &iov_fxsave);
     }
   }
+#endif
   
   B32 fpr_success = (xsave_result != -1 || fxsave_result != -1);
   
   // debug
   B32 dr_success = true;
   {
-    SYMS_Reg32 *dr_s = &src->dr0;
+    REGS_Reg32 *dr_s = &src->dr0;
     for (U32 i = 0; i < 8; i += 1, dr_s += 1){
       if (i != 4 && i != 5){
         U64 offset = OffsetOf(DEMON_LNX_UserX64, u_debugreg[i]);

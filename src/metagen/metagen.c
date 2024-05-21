@@ -1042,8 +1042,8 @@ mg_string_list_from_table_gen(Arena *arena, MG_Map grid_name_map, MG_Map grid_co
         String8 expand_label = expand_label_node->string;
         
         // rjf: lookup table / column descriptions
-        MG_NodeGrid *grid = mg_map_ptr_from_string(&grid_name_map, table_name);
-        MG_ColumnDescArray *column_descs = mg_map_ptr_from_string(&grid_column_desc_map, table_name);
+        MG_NodeGrid *grid = (MG_NodeGrid*)mg_map_ptr_from_string(&grid_name_map, table_name);
+        MG_ColumnDescArray *column_descs = (MG_ColumnDescArray*)mg_map_ptr_from_string(&grid_column_desc_map, table_name);
         
         // rjf: figure out row count
         U64 grid_row_count = 0;

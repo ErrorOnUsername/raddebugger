@@ -840,7 +840,7 @@ os_init(void)
   lnx_perm_arena = perm_arena;
   
   // NOTE(allen): Initialize Paths
-  lnx_initial_path = os_get_path(lnx_perm_arena, OS_SystemPath_Current);
+  lnx_initial_path = os_string_from_system_path(lnx_perm_arena, OS_SystemPath_Current);
   
   // NOTE(rjf): Setup command line args
   lnx_cmd_line_args = os_string_list_from_argcv(lnx_perm_arena, argc, argv);
@@ -885,16 +885,17 @@ os_release(void *ptr, U64 size){
   munmap(ptr, size);
 }
 
-internal void
+internal B32
 os_set_large_pages(B32 flag)
 {
   NotImplemented;
+  return 0;
 }
 
 internal B32
 os_large_pages_enabled(void)
 {
-  NotImplemented;
+  // NotImplemented;
   return 0;
 }
 
@@ -939,7 +940,7 @@ os_machine_name(void){
     for (S64 cap = 4096, r = 0;
          r < 4;
          cap *= 2, r += 1){
-      scratch.restore();
+      arena_pop_to(scratch.arena, scratch.pos);
       buffer = push_array_no_zero(scratch.arena, U8, cap);
       size = gethostname((char*)buffer, cap);
       if (size < cap){
@@ -1040,7 +1041,7 @@ os_string_list_from_system_path(Arena *arena, OS_SystemPath path, String8List *o
         for (S64 cap = PATH_MAX, r = 0;
              r < 4;
              cap *= 2, r += 1){
-          scratch.restore();
+          arena_pop_to(scratch.arena, scratch.pos);
           buffer = push_array_no_zero(scratch.arena, U8, cap);
           size = readlink("/proc/self/exe", (char*)buffer, cap);
           if (size < cap){
@@ -1052,7 +1053,7 @@ os_string_list_from_system_path(Arena *arena, OS_SystemPath path, String8List *o
         // save string
         if (got_final_result && size > 0){
           String8 full_name = str8(buffer, size);
-          String8 name_chopped = string_path_chop_last_slash(full_name);
+          String8 name_chopped = str8_chop_last_slash(full_name);
           name = push_str8_copy(lnx_perm_arena, name_chopped);
         }
         
@@ -1112,31 +1113,75 @@ os_exit_process(S32 exit_code){
 
 //- rjf: files
 
+internal char *
+lnx_open_mode_from_access_flags(OS_AccessFlags flags)
+{
+  if (flags & OS_AccessFlag_Read && flags & OS_AccessFlag_Write)
+  {
+    return "rwb";
+  }
+
+  if (flags & OS_AccessFlag_Read)
+  {
+    return "rb";
+  }
+
+  if (flags & OS_AccessFlag_Write)
+  {
+    return "wb";
+  }
+}
+
 internal OS_Handle
 os_file_open(OS_AccessFlags flags, String8 path)
 {
   OS_Handle file = {0};
-  NotImplemented;
+  Temp scratch = scratch_begin(0, 0);
+
+  // TODO(rd): Should we set the permissions of the file if the Executable
+  //           flag is passed
+  char *mode = lnx_open_mode_from_access_flags(flags);
+
+  // NOTE(rd): We need to copy since fopen needs a null-terminated string
+  String8 dup_str = push_str8_copy(scratch.arena, path);
+
+  file.u64[0] = (U64)fopen((char*)dup_str.str, mode);
+  scratch_end(scratch);
   return file;
 }
 
 internal void
 os_file_close(OS_Handle file)
 {
-  NotImplemented;
+  FILE* f = (FILE*)file.u64[0];
+  fclose(f);
 }
 
 internal U64
 os_file_read(OS_Handle file, Rng1U64 rng, void *out_data)
 {
-  NotImplemented;
-  return 0;
+  if (os_handle_match(file, os_handle_zero())) { return 0; }
+  FILE* f = (FILE*)file.u64[0];
+
+  U64 read_size = rng.max - rng.min;
+
+  fseek(f, rng.min, SEEK_SET);
+  U64 bytes_read = fread(out_data, 1, read_size, f);
+
+  return bytes_read;
 }
 
 internal void
 os_file_write(OS_Handle file, Rng1U64 rng, void *data)
 {
-  NotImplemented;
+  if (os_handle_match(file, os_handle_zero())) { return; }
+  FILE* f = (FILE*)file.u64[0];
+
+  U64 write_size = rng.max - rng.min;
+
+  fseek(f, rng.min, SEEK_SET);
+  U64 bytes_written = fwrite(data, 1, write_size, f);
+  Assert(bytes_written == write_size);
 }
 
 internal B32
@@ -1149,16 +1194,40 @@ internal FileProperties
 os_properties_from_file(OS_Handle file)
 {
   FileProperties props = {0};
-  NotImplemented;
+  
+  if (!os_handle_match(file, os_handle_zero()))
+  {
+    FILE* f = (FILE*)file.u64[0];
+    int fd = fileno(f);
+
+    struct stat st;
+    if (fstat(fd, &st) == 0)
+    {
+      lnx_file_properties_from_stat(&props, &st);
+    }
+  }
+  
   return props;
 }
 
 internal OS_FileID
 os_id_from_file(OS_Handle file)
 {
-  // TODO(nick): querry struct stat with fstat(2) and use st_dev and st_ino as ids
   OS_FileID id = {0};
-  NotImplemented;
+  
+  if (!os_handle_match(file, os_handle_zero()))
+  {
+    FILE* f = (FILE*)file.u64[0];
+    int fd = fileno(f);
+
+    struct stat st;
+    if (fstat(fd, &st) == 0)
+    {
+      id.v[0] = st.st_dev;
+      id.v[1] = st.st_ino;
+    }
+  }
+  
   return id;
 }
 
@@ -1167,7 +1236,7 @@ os_delete_file_at_path(String8 path)
 {
   Temp scratch = scratch_begin(0, 0);
   B32 result = false;
-  String8 name_copy = push_str8_copy(scratch.arena, name);
+  String8 name_copy = push_str8_copy(scratch.arena, path);
   if (remove((char*)name_copy.str) != -1){
     result = true;
   }
@@ -1178,24 +1247,49 @@ os_delete_file_at_path(String8 path)
 internal B32
 os_copy_file_path(String8 dst, String8 src)
 {
-  NotImplemented;
-  return 0;
+  FILE *sf = fopen((char*)src.str, "rb");
+  FILE *df = fopen((char*)dst.str, "wb");
+  if (!sf || !df)
+  {
+    return 0;
+  }
+
+  B32 result = 1;
+
+  fseek(sf, 0, SEEK_END);
+  size_t src_size = ftell(sf);
+  fseek(sf, 0, SEEK_SET);
+
+  ssize_t written = sendfile(fileno(df), fileno(sf), NULL, src_size);
+
+  if (written != src_size)
+  {
+    result = 0;
+  }
+
+  fclose(df);
+  fclose(sf);
+  return result;
 }
 
 internal String8
 os_full_path_from_path(Arena *arena, String8 path)
 {
-  // TODO: realpath can be used to resolve full path
-  String8 result = {0};
-  NotImplemented;
+  Temp scratch = scratch_begin(&arena, 1);
+  char* buffer = (char*)push_array_no_zero(scratch.arena, U8, PATH_MAX);
+  realpath((char*)path.str, buffer);
+  String8 result = push_str8_copy(arena, str8_cstring((char*)buffer));
+  scratch_end(scratch);
   return result;
 }
 
 internal B32
 os_file_path_exists(String8 path)
 {
-  NotImplemented;
-  return 0;
+  B32 result;
+  struct stat st;
+  result = stat((char*)path.str, &st) != 0;
+  return result;
 }
 
 internal FileProperties
@@ -1240,21 +1334,97 @@ os_file_map_view_close(OS_Handle map, void *ptr)
 internal OS_FileIter *
 os_file_iter_begin(Arena *arena, String8 path, OS_FileIterFlags flags)
 {
-  NotImplemented;
-  return 0;
+  Temp scratch = scratch_begin(&arena, 1);
+
+  OS_FileIter *iter = push_array(arena, OS_FileIter, 1);
+  iter->flags = flags;
+
+  LNX_FileIter *lnx_iter = (LNX_FileIter*)iter->memory;
+  lnx_iter->dir = opendir((char*)path.str);
+  lnx_iter->fd = dirfd(lnx_iter->dir);
+
+  scratch_end(scratch);
+  return iter;
 }
 
 internal B32
 os_file_iter_next(Arena *arena, OS_FileIter *iter, OS_FileInfo *info_out)
 {
-  NotImplemented;
-  return 0;
+  B32 result = 0;
+  OS_FileIterFlags flags = iter->flags;
+  LNX_FileIter *lnx_iter = (LNX_FileIter*)iter->memory;
+  if (!(flags & OS_FileIterFlag_Done) && lnx_iter->dir)
+  {
+    struct dirent *dir_ent = readdir(lnx_iter->dir);
+    while (dir_ent != NULL)
+    {
+      B32 usable_file = 1;
+
+      U8 file_type = dir_ent->d_type;
+      char *name = dir_ent->d_name;
+      if (name[0] == '.')
+      {
+        if (flags & OS_FileIterFlag_SkipHiddenFiles)
+        {
+          usable_file = 0;
+        }
+        else if (name[1] == 0)
+        {
+          usable_file = 0;
+        }
+        else if (name[1] == '.' && name[2] == 0)
+        {
+          usable_file = 0;
+        }
+      }
+      if (file_type == DT_DIR)
+      {
+        if (flags & OS_FileIterFlag_SkipFolders)
+        {
+          usable_file = 0;
+        }
+      }
+      else
+      {
+        if (flags & OS_FileIterFlag_SkipFiles)
+        {
+          usable_file = 0;
+        }
+      }
+
+      if (usable_file)
+      {
+        info_out->name = push_str8_copy(arena, str8_cstring(name));
+
+        struct stat stat_data;
+        if (fstatat(lnx_iter->fd, (char*)info_out->name.str, &stat_data, 0) != 0)
+        {
+          InvalidPath;
+        }
+
+        lnx_file_properties_from_stat(&info_out->props, &stat_data);
+        result = 1;
+        break;
+      }
+
+      dir_ent = readdir(lnx_iter->dir);
+    }
+
+    if (!result)
+    {
+      iter->flags |= OS_FileIterFlag_Done;
+    }
+  }
+
+  return result;
 }
 
 internal void
 os_file_iter_end(OS_FileIter *iter)
 {
-  NotImplemented;
+  LNX_FileIter *lnx_iter = (LNX_FileIter*)iter->memory;
+  closedir(lnx_iter->dir);
+  lnx_iter->fd = -1;
 }
 
 //- rjf: directory creation
@@ -1264,7 +1434,7 @@ os_make_directory(String8 path)
 {
   Temp scratch = scratch_begin(0, 0);
   B32 result = false;
-  String8 name_copy = push_str8_copy(scratch.arena, name);
+  String8 name_copy = push_str8_copy(scratch.arena, path);
   if (mkdir((char*)name_copy.str, 0777) != -1){
     result = true;
   }
@@ -1380,7 +1550,7 @@ os_sleep_milliseconds(U32 msec){
 //~ rjf: @os_hooks Child Processes (Implemented Per-OS)
 
 internal B32
-os_launch_process(OS_LaunchOptions *options){
+os_launch_process(OS_LaunchOptions *options, OS_Handle *handle_out){
   // TODO(allen): I want to redo this API before I bother implementing it here
   NotImplemented;
   return(false);
@@ -1414,7 +1584,7 @@ os_launch_thread(OS_ThreadFunctionType *func, void *ptr, void *params){
 
 internal void
 os_release_thread_handle(OS_Handle thread){
-  LNX_Entity *entity = (LNX_Entity*)PtrFromInt(thread.id);
+  LNX_Entity *entity = (LNX_Entity*)PtrFromInt(thread.u64[0]);
   // remove my bit
   U32 result = __sync_fetch_and_and(&entity->reference_mask, ~0x1);
   // if the other bit is also gone, free entity
@@ -1454,20 +1624,20 @@ os_mutex_alloc(void){
 
 internal void
 os_mutex_release(OS_Handle mutex){
-  LNX_Entity *entity = (LNX_Entity*)PtrFromInt(mutex.id);
+  LNX_Entity *entity = (LNX_Entity*)PtrFromInt(mutex.u64[0]);
   pthread_mutex_destroy(&entity->mutex);
   lnx_free_entity(entity);
 }
 
 internal void
 os_mutex_take_(OS_Handle mutex){
-  LNX_Entity *entity = (LNX_Entity*)PtrFromInt(mutex.id);
+  LNX_Entity *entity = (LNX_Entity*)PtrFromInt(mutex.u64[0]);
   pthread_mutex_lock(&entity->mutex);
 }
 
 internal void
 os_mutex_drop_(OS_Handle mutex){
-  LNX_Entity *entity = (LNX_Entity*)PtrFromInt(mutex.id);
+  LNX_Entity *entity = (LNX_Entity*)PtrFromInt(mutex.u64[0]);
   pthread_mutex_unlock(&entity->mutex);
 }
 
@@ -1535,18 +1705,22 @@ os_condition_variable_alloc(void){
 
 internal void
 os_condition_variable_release(OS_Handle cv){
-  LNX_Entity *entity = (LNX_Entity*)PtrFromInt(cv.id);
+  LNX_Entity *entity = (LNX_Entity*)PtrFromInt(cv.u64[0]);
   pthread_cond_destroy(&entity->cond);
   lnx_free_entity(entity);
 }
 
 internal B32
 os_condition_variable_wait_(OS_Handle cv, OS_Handle mutex, U64 endt_us){
-  B32 result = false;
-  LNX_Entity *entity_cond = (LNX_Entity*)PtrFromInt(cv.id);
-  LNX_Entity *entity_mutex = (LNX_Entity*)PtrFromInt(mutex.id);
-  // TODO(allen): implement the time control
-  pthread_cond_timedwait(&entity_cond->cond, &entity_mutex->mutex);
+  B32 result = 0;
+  LNX_Entity *entity_cond = (LNX_Entity*)PtrFromInt(cv.u64[0]);
+  LNX_Entity *entity_mutex = (LNX_Entity*)PtrFromInt(mutex.u64[0]);
+
+  struct timespec ts;
+  ts.tv_sec = endt_us / Million(1);
+  ts.tv_nsec = (endt_us % Million(1)) * 1000;
+
+  pthread_cond_timedwait(&entity_cond->cond, &entity_mutex->mutex, &ts);
   return(result);
 }
 
@@ -1566,14 +1740,14 @@ os_condition_variable_wait_rw_w_(OS_Handle cv, OS_Handle mutex_rw, U64 endt_us)
 
 internal void
 os_condition_variable_signal_(OS_Handle cv){
-  LNX_Entity *entity = (LNX_Entity*)PtrFromInt(cv.id);
+  LNX_Entity *entity = (LNX_Entity*)PtrFromInt(cv.u64[0]);
   pthread_cond_signal(&entity->cond);
 }
 
 internal void
 os_condition_variable_broadcast_(OS_Handle cv){
-  LNX_Entity *entity = (LNX_Entity*)PtrFromInt(cv.id);
-  DontCompile;
+  LNX_Entity *entity = (LNX_Entity*)PtrFromInt(cv.u64[0]);
+  pthread_cond_broadcast(&entity->cond);
 }
 
 //- rjf: cross-process semaphores
@@ -1637,7 +1811,7 @@ internal VoidProc *
 os_library_load_proc(OS_Handle lib, String8 name)
 {
   Temp scratch = scratch_begin(0, 0);
-  void *so = (void *)lib.id;
+  void *so = (void *)lib.u64[0];
   char *name_cstr = (char *)push_str8_copy(scratch.arena, name).str;
   VoidProc *proc = (VoidProc *)dlsym(so, name_cstr);
   scratch_end(scratch);
@@ -1647,7 +1821,7 @@ os_library_load_proc(OS_Handle lib, String8 name)
 internal void
 os_library_close(OS_Handle lib)
 {
-  void *so = (void *)lib.id;
+  void *so = (void *)lib.u64[0];
   dlclose(so);
 }
 
